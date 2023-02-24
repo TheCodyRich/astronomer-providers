@@ -1,10 +1,12 @@
 # config/airflow_local_settings.py
 
+import pprint
+from importlib import import_module
 from typing import Optional
 
 from airflow.models import Variable
 from airflow.models.baseoperator import BaseOperator
-from airflow.operators.python import task
+from airflow.sensors.base import BaseSensorOperator
 
 
 def task_has_deferrable_attribute(task: BaseOperator) -> bool:
@@ -36,17 +38,44 @@ def strtobool(val: str) -> bool:
         raise ValueError(f"invalid truth value {val}")
 
 
-def task_policy(task: BaseOperator) -> None:
+def get_enable_deferred_execution() -> Optional[bool]:
     # it's can be loaded from db, env var and elsewhere if desired
     # but using Airflow Variable enables user to toggle it easily
     try:
         enable_deferred_execution_var = Variable.get("ENABLE_DEFERRED_EXECUTION", None)
         if isinstance(enable_deferred_execution_var, str):
-            enable_deferred_execution = strtobool(enable_deferred_execution_var)
-        else:
-            enable_deferred_execution = None
+            return strtobool(enable_deferred_execution_var)
     except ValueError:
-        enable_deferred_execution = None
-    task.deferrable = enable_deferred_execution
+        return None
+    return None
 
-    print("wei-testing task __dict__", task.__dict__)
+
+def task_policy(task: BaseOperator) -> None:
+    enable_deferred_execution = get_enable_deferred_execution()
+
+    # pp = pprint.PrettyPrinter(indent=4)
+
+    if isinstance(task, BaseSensorOperator):
+        # currently, always use deferable
+        print(f"wei-testing sensor operator {task}")
+
+        task_cls = task.__class__
+        task_cls_name = task_cls.__name__
+
+        if "Async" in task_cls_name:
+            print(f"task {task} is an Async Sensor")
+        else:
+            async_cls_name = f"{task_cls_name}Async"
+            module_path = task.__module__.replace("airflow", "astronomer")
+            try:
+                async_cls = getattr(import_module(module_path), async_cls_name)
+            except AttributeError as exc:
+                print(f"Cannot import Async Sensor {async_cls_name} due to {exc}")
+                pass
+            else:
+                print(f"yes, {async_cls} imported")
+
+        # pp.pprint(dir())
+    else:
+        task.deferrable = enable_deferred_execution
+        print("wei-testing task __dict__", task.__dict__)
