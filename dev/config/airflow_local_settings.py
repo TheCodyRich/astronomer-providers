@@ -67,64 +67,24 @@ def enable_sensor_deferred_execution(task: BaseSensorOperator) -> None:
             print(f"Sensor {task} has no deferrable version available")
         elif async_cls:
             async_cls_name = async_cls.__class__.__name__
-            if async_cls_name in ("BigQueryTableExistencePartitionAsyncSensor", "ExternalTaskSensorAsync"):
+            if async_cls_name == "BigQueryTableExistencePartitionAsyncSensor":
                 task.poke_interval = getattr(task, "poke_interval", 5)
 
             elif async_cls_name == "BigQueryTableExistenceAsyncSensor":
                 task.polling_interval = getattr(task, "polling_interval", 5.0)
 
-            elif async_cls_name in ("DbtCloudJobRunAsyncSensor", "DbtCloudJobRunSensorAsync"):
+            elif async_cls_name == "DbtCloudJobRunAsyncSensor":
                 task.poll_interval = getattr(task, "poll_interval", 5)
                 task.timeout = getattr(task, "timeout", 60 * 60 * 24 * 7)
-
-            elif async_cls_name in (
-                "RedshiftClusterSensorAsync",
-                "BatchSensorAsync",
-                "BigQueryTableExistenceAsyncSensor",
-                "GCSObjectExistenceSensorAsync",
-                "GCSObjectsWithPrefixExistenceSensorAsync," "GCSUploadSessionCompleteSensorAsync",
-                "GCSObjectUpdateSensorAsync",
-                "AzureDataFactoryPipelineRunStatusSensorAsync",
-            ):
-                task.poke_interval = getattr(task, "poke_interval", getattr(task, "poll_interval", 5))
-
-            elif async_cls_name == "SFTPSensorAsync":
-                from airflow.configuration import conf
-                from astronomer.providers.sftp.hooks.sftp import SFTPHookAsync
-
-                task.timeout = conf.getfloat("sensors", "default_timeout")
-                task.hook = SFTPHookAsync(sftp_conn_id=task.sftp_conn_id)  # type: ignore[assignment]
-
-            elif async_cls_name == "S3KeySensorAsync":
-                task.bucket_key = [task.bucket_key] if isinstance(task.bucket_key, str) else task.bucket_key
-                task.hook = None
-
-            elif async_cls_name == "WasbBlobSensorAsync":
-                task.public_read = getattr(task, "public_read", False)
-
-            elif async_cls_name == "WasbPrefixSensorAsync":
-                task.include = getattr(task, "include", None)
-                task.delimiter = getattr(task, "delimiter", "/")
-                task.public_read = getattr(task, "public_read", False)
-                task.poke_interval = getattr(task, "poke_interval", getattr(task, "poll_interval", 5))
-
-            elif async_cls_name == "EmrJobFlowSensorAsync":
-                task.poll_interval = getattr(task, "poll_interval", 5.0)
-
-            elif async_cls_name == "HttpSensorAsync":
-                # TODO: behavior TBD
+            elif async_cls_name == "GCSObjectExistenceAsyncSensor":
+                pass
+            else:
                 print(
-                    "HttpSensorAsync and HttpSensor have different signature and cannot be transformed directly"
+                    f"{async_cls_name} is not expected. "
+                    "Without extra handling, it might cause errors hard to trace. "
+                    f"Skip transforming {task.__class__.__name__} to {async_cls_name}"
                 )
                 return
-
-            # the following async sensors don't need extra logic
-            #   FileSensorAsync
-            #   S3KeysUnchangedSensorAsync
-            #   EmrContainerSensorAsync
-            #   EmrStepSensorAsync
-            #   HivePartitionSensorAsync
-            #   NamedHivePartitionSensorAsync
 
             task.__class__ = async_cls
             print(
@@ -141,17 +101,10 @@ def get_sensor_async_version_cls(task: BaseSensorOperator) -> type | None:
     if "Async" in task_cls_name:
         return task_cls
     else:
-        # search in astronomer provider
-        async_cls_name = f"{task_cls_name}Async"
-        module_name = task.__module__.replace("airflow", "astronomer")
+        # search in airflow provider
+        async_cls_name = f"{task_cls_name[:-6]}AsyncSensor"
+        module_name = task.__module__.replace("astronomer", "airflow")
         async_cls = import_async_sensor(module_name, async_cls_name)
-
-        if not async_cls:
-            # search in airflow provider
-            async_cls_name = f"{task_cls_name[:-6]}AsyncSensor"
-            module_name = task.__module__.replace("astronomer", "airflow")
-            async_cls = import_async_sensor(module_name, async_cls_name)
-
         return async_cls
 
 
