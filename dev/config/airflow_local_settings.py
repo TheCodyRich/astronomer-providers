@@ -1,22 +1,44 @@
 # config/airflow_local_settings.py
+from __future__ import annotations
 
-import pprint
+import logging
+from contextlib import redirect_stdout
+from functools import wraps
 from importlib import import_module
-from typing import Optional
+from io import StringIO
+from typing import Callable
 
 from airflow.models import Variable
 from airflow.models.baseoperator import BaseOperator
 from airflow.sensors.base import BaseSensorOperator
 
 
-def task_has_deferrable_attribute(task: BaseOperator) -> bool:
-    # check whether an operator has the deferrable attribute
-    # if not, it means the operator does not have a Async version
+def task_policy(task: BaseOperator) -> None:
+    enable_auto_deferred_execution = get_enable_auto_deferred_execution()
+    logging.info(f"'enable_auto_deferred_execution' is set to {enable_auto_deferred_execution}")
+
+    with redirect_stdout(StringIO()) as f:
+        if enable_auto_deferred_execution:
+            print(f"Switching automatically to deferred execution for task {task}")
+
+            if isinstance(task, BaseSensorOperator):
+                enable_sensor_deferred_execution(task)
+            else:
+                enable_operator_deferred_execution(task)
+
+            task.pre_execute = decorate_task_pre_execute(func=task.pre_execute, log_message=f.getvalue())
+
+
+def get_enable_auto_deferred_execution() -> bool | None:
+    # it's can be loaded from db, env var and elsewhere if desired
+    # but using Airflow Variable enables user to toggle it easily
     try:
-        task.deferrable
-    except AttributeError:
-        return False
-    return True
+        enable_auto_deferred_execution_var = Variable.get("enable_auto_deferred_execution", None)
+        if isinstance(enable_auto_deferred_execution_var, str):
+            return strtobool(enable_auto_deferred_execution_var)
+    except ValueError:
+        return None
+    return None
 
 
 def strtobool(val: str) -> bool:
@@ -25,7 +47,6 @@ def strtobool(val: str) -> bool:
     True values are 'y', 'yes', 't', 'true', 'on', and '1'; false values
     are 'n', 'no', 'f', 'false', 'off', and '0'.  Raises ValueError if
     'val' is anything else.
-
 
     modified from distutils.util.strtobool as distutils is depcrecating
     """
@@ -38,44 +59,135 @@ def strtobool(val: str) -> bool:
         raise ValueError(f"invalid truth value {val}")
 
 
-def get_enable_deferred_execution() -> Optional[bool]:
-    # it's can be loaded from db, env var and elsewhere if desired
-    # but using Airflow Variable enables user to toggle it easily
-    try:
-        enable_deferred_execution_var = Variable.get("ENABLE_DEFERRED_EXECUTION", None)
-        if isinstance(enable_deferred_execution_var, str):
-            return strtobool(enable_deferred_execution_var)
-    except ValueError:
-        return None
-    return None
+def enable_sensor_deferred_execution(task: BaseSensorOperator) -> None:
+    original_cls_name = task.__class__.__name__
+    if "Async" not in original_cls_name:
+        async_cls = get_sensor_async_version_cls(task)
+        if not async_cls:
+            print(f"Sensor {task} has no deferrable version available")
+        elif async_cls:
+            async_cls_name = async_cls.__class__.__name__
+            if async_cls_name in ("BigQueryTableExistencePartitionAsyncSensor", "ExternalTaskSensorAsync"):
+                task.poke_interval = getattr(task, "poke_interval", 5)
 
+            elif async_cls_name == "BigQueryTableExistenceAsyncSensor":
+                task.polling_interval = getattr(task, "polling_interval", 5.0)
 
-def task_policy(task: BaseOperator) -> None:
-    enable_deferred_execution = get_enable_deferred_execution()
+            elif async_cls_name in ("DbtCloudJobRunAsyncSensor", "DbtCloudJobRunSensorAsync"):
+                task.poll_interval = getattr(task, "poll_interval", 5)
+                task.timeout = getattr(task, "timeout", 60 * 60 * 24 * 7)
 
-    # pp = pprint.PrettyPrinter(indent=4)
+            elif async_cls_name in (
+                "RedshiftClusterSensorAsync",
+                "BatchSensorAsync",
+                "BigQueryTableExistenceAsyncSensor",
+                "GCSObjectExistenceSensorAsync",
+                "GCSObjectsWithPrefixExistenceSensorAsync," "GCSUploadSessionCompleteSensorAsync",
+                "GCSObjectUpdateSensorAsync",
+                "AzureDataFactoryPipelineRunStatusSensorAsync",
+            ):
+                task.poke_interval = getattr(task, "poke_interval", getattr(task, "poll_interval", 5))
 
-    if isinstance(task, BaseSensorOperator):
-        # currently, always use deferable
-        print(f"wei-testing sensor operator {task}")
+            elif async_cls_name == "SFTPSensorAsync":
+                from airflow.configuration import conf
+                from astronomer.providers.sftp.hooks.sftp import SFTPHookAsync
 
-        task_cls = task.__class__
-        task_cls_name = task_cls.__name__
+                task.timeout = conf.getfloat("sensors", "default_timeout")
+                task.hook = SFTPHookAsync(sftp_conn_id=task.sftp_conn_id)  # type: ignore[assignment]
 
-        if "Async" in task_cls_name:
-            print(f"task {task} is an Async Sensor")
-        else:
-            async_cls_name = f"{task_cls_name}Async"
-            module_path = task.__module__.replace("airflow", "astronomer")
-            try:
-                async_cls = getattr(import_module(module_path), async_cls_name)
-            except AttributeError as exc:
-                print(f"Cannot import Async Sensor {async_cls_name} due to {exc}")
-                pass
-            else:
-                print(f"yes, {async_cls} imported")
+            elif async_cls_name == "S3KeySensorAsync":
+                task.bucket_key = [task.bucket_key] if isinstance(task.bucket_key, str) else task.bucket_key
+                task.hook = None
 
-        # pp.pprint(dir())
+            elif async_cls_name == "WasbBlobSensorAsync":
+                task.public_read = getattr(task, "public_read", False)
+
+            elif async_cls_name == "WasbPrefixSensorAsync":
+                task.include = getattr(task, "include", None)
+                task.delimiter = getattr(task, "delimiter", "/")
+                task.public_read = getattr(task, "public_read", False)
+                task.poke_interval = getattr(task, "poke_interval", getattr(task, "poll_interval", 5))
+
+            elif async_cls_name == "EmrJobFlowSensorAsync":
+                task.poll_interval = getattr(task, "poll_interval", 5.0)
+
+            elif async_cls_name == "HttpSensorAsync":
+                # TODO: behavior TBD
+                print(
+                    "HttpSensorAsync and HttpSensor have different signature and cannot be transformed directly"
+                )
+                return
+
+            # the following async sensors don't need extra logic
+            #   FileSensorAsync
+            #   S3KeysUnchangedSensorAsync
+            #   EmrContainerSensorAsync
+            #   EmrStepSensorAsync
+            #   HivePartitionSensorAsync
+            #   NamedHivePartitionSensorAsync
+
+            task.__class__ = async_cls
+            print(
+                f"Sensor {task} has been switched from {original_cls_name} " f"to {task.__class__.__name__}"
+            )
     else:
-        task.deferrable = enable_deferred_execution
-        print("wei-testing task __dict__", task.__dict__)
+        print(f"Sensor {task} is an async sensor")
+
+
+def get_sensor_async_version_cls(task: BaseSensorOperator) -> type | None:
+    task_cls = task.__class__
+    task_cls_name = task_cls.__name__
+
+    if "Async" in task_cls_name:
+        return task_cls
+    else:
+        # search in astronomer provider
+        async_cls_name = f"{task_cls_name}Async"
+        module_name = task.__module__.replace("airflow", "astronomer")
+        async_cls = import_async_sensor(module_name, async_cls_name)
+
+        if not async_cls:
+            # search in airflow provider
+            async_cls_name = f"{task_cls_name[:-6]}AsyncSensor"
+            module_name = task.__module__.replace("astronomer", "airflow")
+            async_cls = import_async_sensor(module_name, async_cls_name)
+
+        return async_cls
+
+
+def import_async_sensor(module_name: str, async_cls_name: str) -> type | None:
+    try:
+        async_cls = getattr(import_module(module_name), async_cls_name)
+    except (ImportError, AttributeError) as exc:
+        print(f"Cannot import Async Sensor {async_cls_name} due to {exc}")
+    else:
+        print(f"{async_cls} imported")
+        return async_cls
+
+
+def enable_operator_deferred_execution(task: BaseOperator) -> None:
+    if task_has_deferrable_attribute(task):
+        task.deferrable = True
+
+        print(f"Operator {task} has been switched to deferred execution")
+        print(f"task.deferrable = {task.deferrable}")
+    else:
+        print(f"Operator {task} has no deferrable version\n")
+
+
+def task_has_deferrable_attribute(task: BaseOperator) -> bool:
+    """check whether an operator has the deferrable attribute"""
+    try:
+        task.deferrable
+    except AttributeError:
+        return False
+    return True
+
+
+def decorate_task_pre_execute(func: Callable, log_message: str) -> Callable:
+    @wraps(func)
+    def wrapper(*args, **kwargs) -> Callable:
+        logging.info(log_message)
+        return func(*args, **kwargs)
+
+    return wrapper
