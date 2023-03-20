@@ -80,4 +80,11 @@ RUN cp -r example_* ${AIRFLOW_HOME}/dags
 RUN cp master_dag.py  ${AIRFLOW_HOME}/dags/
 RUN cp nuke-config.yml  ${AIRFLOW_HOME}/dags/
 
+RUN cp verify_big_query_insert_job_operator.py  ${AIRFLOW_HOME}/dags/
+RUN cp verify_big_query_table_existence_sensor.py  ${AIRFLOW_HOME}/dags/
+RUN cp verify_dbt_cloud_job_run_sensor.py  ${AIRFLOW_HOME}/dags/
+#
+RUN mkdir -p ${AIRFLOW_HOME}/config
+RUN cp airflow_local_settings.py  ${AIRFLOW_HOME}/config/
+
 USER astro
