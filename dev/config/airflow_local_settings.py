@@ -19,7 +19,9 @@ def task_policy(task: BaseOperator) -> None:
 
     with redirect_stdout(StringIO()) as f:
         if enable_auto_deferred_execution:
-            print(f"Switching automatically to deferred execution for task {task}")
+            print(
+                f"OperatorAutoSwitch: dag_id={task.dag_id}, task_id={task.task_id}, operator={task.operator_name}"
+            )
 
             if isinstance(task, BaseSensorOperator):
                 enable_sensor_deferred_execution(task)
@@ -66,7 +68,9 @@ def enable_sensor_deferred_execution(task: BaseSensorOperator) -> None:
         if not async_cls:
             print(f"Sensor {task} has no deferrable version available")
         elif async_cls:
-            async_cls_name = async_cls.__class__.__name__
+            async_cls_name = async_cls.__name__
+            print(f"{async_cls} ---debug")
+            print(f"{async_cls_name} ---debug")
             if async_cls_name == "BigQueryTableExistencePartitionAsyncSensor":
                 task.poke_interval = getattr(task, "poke_interval", 5)
 
