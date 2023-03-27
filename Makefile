@@ -1,12 +1,23 @@
 .PHONY: dev logs stop clean build build-emr_eks_container_example_dag-image build-aws build-google-cloud build-run docs
 .PHONY: restart restart-all run-tests run-static-checks run-mypy run-local-lineage-server test-rc-deps shell help
 
-# If the first argument is "run"...
+# If the first argument is "run-mypy"...
 ifeq (run-mypy,$(firstword $(MAKECMDGOALS)))
   # use the rest as arguments for "run"
   RUN_ARGS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
   ifndef RUN_ARGS
   RUN_ARGS := .
+  endif
+  # ...and turn them into do-nothing targets
+  $(eval $(RUN_ARGS):;@:)
+endif
+
+# If the first argument is "run-pytest"...
+ifeq (run-tests,$(firstword $(MAKECMDGOALS)))
+  # use the rest as arguments for "run"
+  RUN_ARGS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
+  ifndef RUN_ARGS
+  RUN_ARGS := tests
   endif
   # ...and turn them into do-nothing targets
   $(eval $(RUN_ARGS):;@:)
@@ -55,7 +66,7 @@ run-tests: ## Run CI tests
 	docker build --build-arg IMAGE_NAME=$(ASTRO_RUNTIME_IMAGE_NAME) -f dev/Dockerfile . -t astronomer-providers-dev
 	docker run -v `pwd`:/usr/local/airflow/astronomer_providers -v `pwd`/dev/.cache:/home/astro/.cache \
 	 	-w /usr/local/airflow/astronomer_providers \
-		--rm -it astronomer-providers-dev -- pytest tests
+		--rm -it astronomer-providers-dev -- pytest $(RUN_ARGS)
 
 run-static-checks: ## Run CI static code checks
 	docker build --build-arg IMAGE_NAME=$(ASTRO_RUNTIME_IMAGE_NAME) -f dev/Dockerfile . -t astronomer-providers-dev
